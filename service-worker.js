@@ -1,4 +1,4 @@
-const CACHE_NAME = 'penzugyeim-1-2-ocr';
+const CACHE_NAME = 'penzugyeim-1-5-ai';
 const APP_SHELL = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
