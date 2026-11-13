@@ -184,7 +184,7 @@ const grouped={};items.forEach(i=>{const k=i.product_key||i.product_name.toLocal
 async function renderWarranties(){
   if(!docDb)return;
   const [docs,items]=await Promise.all([getAllDocs(),getAllDocItems()]);
-  const products=items.map(item=>({item,doc:docs.find(d=>d.id===item.document_id)})).filter(x=>x.doc);
+  const products=items.map(item=>({item,doc:docs.find(d=>d.id===item.document_id)})).filter(x=>x.doc&&!/visszavaltasi dij|betetdij/i.test(normalizeOcrLine(x.item.product_name||'')));
   const uniqueDocs=new Set(products.map(x=>x.doc.id));
   $('warrantyCount').textContent=products.length+' termék';
   $('warrantyProductCount').textContent=products.length;
@@ -227,38 +227,52 @@ function parseReceiptDate(raw){
 }
 function extractReceiptFields(raw){
   const lines=raw.split(/\r?\n/).map(x=>x.replace(/\s+/g,' ').trim()).filter(x=>x.length>1);
-  const excluded=/^(összesen|vegosszeg|fizetendo|fizetendő|fizetve|visszajaro|visszajáró|afa|áfa|netto|nettó|brutto|bruttó|adó|kedvezmény|megtakarítás|bankkártya|készpénz|kartya|kártya|nyugta|számla|adóalap|áfa kulcs|pénztár|pénztáros|köszönjük)/i;
-  const totalLabels=/végösszeg|fizetendő|fizetendő összeg|összesen|fizetve|grand total|total due|amount due/i;
-  const moneyRe=/(\d{1,3}(?:[ .]\d{3})+(?:[,.]\d{2})?|\d+(?:[,.]\d{2})?)\s*(?:ft|huf|eur|€|usd)?\s*$/i;
+  const normLines=lines.map(normalizeOcrLine);
+  const moneyRe=/(?<![,\.\d])(\d{1,3}(?:[ .]\d{3})+(?:[,.]\d{2})?|\d+(?:[,.]\d{2})?)\s*(?:ft|huf|eur|€|usd)?\s*$/i;
   let total=null,totalLine='';
   for(let i=lines.length-1;i>=0;i--){
-    if(/vegosszeg|fizetendo|osszesen|fizetve|grand total|total due|amount due/.test(normalizeOcrLine(lines[i]))){
-      const m=lines[i].match(moneyRe);if(m){total=parseReceiptMoney(m[1]);totalLine=lines[i];break}
+    if(/vegosszeg|fizetendo|osszesen|fizetve|grand total|total due|amount due/.test(normLines[i])){
+      const m=lines[i].match(moneyRe);
+      if(m){total=parseReceiptMoney(m[1]);totalLine=lines[i];break}
       if(i+1<lines.length){const n=lines[i+1].match(moneyRe);if(n){total=parseReceiptMoney(n[1]);totalLine=lines[i+1];break}}
     }
   }
-  if(total===null){
-    const candidates=lines.map((line,index)=>({line,index,m:line.match(moneyRe)})).filter(x=>x.m&&!excluded.test(normalizeOcrLine(x.line)));
-    if(candidates.length){const x=candidates[candidates.length-1];total=parseReceiptMoney(x.m[1]);totalLine=x.line}
-  }
   const date=parseReceiptDate(raw);
-  const merchant=lines.slice(0,8).find(x=>x.length>=3&&x.length<=65&&!/(nyugta|sz[aá]mla|ad[oó]sz[aá]m|p[eé]nzt[aá]r|d[aá]tum|tel:|www\.|http)/i.test(x)&&!/\d{4,}/.test(x))||'';
+  const merchant=lines.slice(0,10).find(x=>/bt\.?|kft\.?|zrt\.?|nyrt\.?|ltd\.?|shop|market/i.test(x)&&x.length<75)
+    ||lines.slice(0,6).find(x=>x.length>=3&&x.length<=65&&!/(nyugta|sz[aá]mla|ad[oó]sz[aá]m|p[eé]nzt[aá]r|d[aá]tum|tel:|www\.|http)/i.test(x)&&!/\d{4,}/.test(x))||'';
   const items=[];
-  for(const line of lines){
-    const norm=normalizeOcrLine(line);
-    if(excluded.test(norm)||/vegosszeg|fizetendo|osszesen|fizetve|grand total|total due|amount due/.test(norm)||/^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}$/.test(line)||/^\d{4}[./-]\d{1,2}[./-]\d{1,2}/.test(line)||/^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\s+\d{1,2}:\d{2}/.test(line))continue;
+  const isDeposit=s=>/visszavaltasi dij|betetdij|betet dij/.test(normalizeOcrLine(s));
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i],norm=normLines[i];
+    if(/^(e00|e0o)\b/.test(norm)||isDeposit(line)){
+      const m=line.match(moneyRe);
+      if(m){const amount=parseReceiptMoney(m[1]);if(amount>0)items.push({name:'Visszaváltási díj',quantity:1,unit:'db',unit_price:amount,discount_amount:0,category:'Szolgáltatás',is_deposit:true})}
+      else if(i+1<lines.length&&isDeposit(lines[i+1])){
+        const n=lines[i+1].match(moneyRe);if(n){const amount=parseReceiptMoney(n[1]);if(amount>0)items.push({name:'Visszaváltási díj',quantity:1,unit:'db',unit_price:amount,discount_amount:0,category:'Szolgáltatás',is_deposit:true});i++}
+      }
+      continue;
+    }
+    if(/vegosszeg|fizetendo|osszesen|fizetve|grand total|total due|amount due|bankkartya|keszpenz|nyugta|szamla|adoszam|erp:|nyugtaszam/.test(norm))continue;
+    if(/^\d{4}[./-]\d{1,2}[./-]\d{1,2}/.test(line)||/^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}/.test(line))continue;
     const m=line.match(moneyRe);if(!m)continue;
     const price=parseReceiptMoney(m[1]);if(price===null||price<=0||price>100000000)continue;
     let name=line.slice(0,m.index).replace(/[\s*#|:;,-]+$/,'').trim();
-    name=name.replace(/^\d+[.)]?\s*/,'').trim();
+    name=name.replace(/^(coo|c00|c0o)\s+/i,'').replace(/^\d+[.)]?\s*/,'').trim();
+    if(name.length<2||name.length>120||/^\d+$/.test(name))continue;
     let qty=1,unit='db';
-    const q=name.match(/(?:^|\s)(\d+(?:[,.]\d+)?)\s*(kg|g|l|ml|db|x|×)\s*$/i);
-    if(q){qty=Number(q[1].replace(',','.'));unit=/kg/i.test(q[2])?'kg':/^g$/i.test(q[2])?'g':/^l$/i.test(q[2])?'l':/^ml$/i.test(q[2])?'ml':'db';name=name.slice(0,q.index).trim()}
-    if(name.length<2||name.length>100||/^\d+$/.test(name))continue;
+    const detail=lines[i+1]||'';
+    const q=detail.match(/(\d+(?:[,.]\d+)?)\s*(darab|db|kg|g|l|ml)\s*\*/i);
+    if(q){qty=Number(q[1].replace(',','.'))||1;unit=/kg/i.test(q[2])?'kg':/^g$/i.test(q[2])?'g':/^l$/i.test(q[2])?'l':/^ml$/i.test(q[2])?'ml':'db';}
+    else{
+      const q2=name.match(/(?:^|\s)(\d+(?:[,.]\d+)?)\s*(kg|g|l|ml|db)\s*$/i);
+      if(q2){qty=Number(q2[1].replace(',','.'))||1;unit=/kg/i.test(q2[2])?'kg':/^g$/i.test(q2[2])?'g':/^l$/i.test(q2[2])?'l':/^ml$/i.test(q2[2])?'ml':'db';name=name.slice(0,q2.index).trim()}
+    }
     if(items.some(x=>normalizeOcrLine(x.name)===normalizeOcrLine(name)))continue;
-    items.push({name,quantity:qty||1,unit,unit_price:price,discount_amount:0,category:'Egyéb'});
+    items.push({name,quantity:qty,unit,unit_price:price,discount_amount:0,category:'Egyéb'});
   }
-  return {lines,merchant,date,total,totalLine,items};
+  const receiptNumber=(raw.match(/(?:nyugtasz[aá]m|nyugta\s*sz[aá]m)\s*:?\s*([0-9/]+)/i)||[])[1]||'';
+  const paymentMethod=/bankk[aá]rtya/i.test(raw)?'Bankkártya':/k[eé]szp[eé]nz/i.test(raw)?'Készpénz':'';
+  return {lines,merchant,date,total,totalLine,items,receiptNumber,paymentMethod};
 }
 async function runLocalReceiptOCR(){
  const file=pendingDocFile;if(!file){alert('Előbb készíts fotót vagy válassz ki egy dokumentumot.');return}
